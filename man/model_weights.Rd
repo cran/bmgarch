@@ -7,6 +7,7 @@
 model_weights(
   bmgarch_objects = NULL,
   L = NULL,
+  M = 1,
   method = "stacking",
   mode = "backward"
 )
@@ -15,6 +16,8 @@ model_weights(
 \item{bmgarch_objects}{list of bmgarch model objects in \code{bmgarch_object}}
 
 \item{L}{Minimal length of time series before engaging in lfocv}
+
+\item{M}{M step head predictions. Defines to what period the LFO-CV should be tuned to. Defaults to M=1.}
 
 \item{method}{Ensemble methods, 'stacking' (default) or 'pseudobma'}
 
@@ -38,7 +41,7 @@ to compute expected log predictive density (ELPD).
 We can either obtain stacking weights or pseudo-BMA+ weigths as described in \insertCite{Yao2018}{bmgarch}.
 }
 \examples{
-\donttest{
+\dontrun{
 data(stocks)
 # Fit at least two models on a subset of the stocks data
 # to compute model weights
