@@ -1,4 +1,4 @@
-// pdBEKK-Parameterization
+// BEKK-Parameterization
 functions { 
 #include /functions/cov2cor.stan
 }
@@ -8,11 +8,11 @@ data {
 }
 
 transformed data {
-  // Obtain mean and sd ove TS for prior in arma process phi0
+
+  // Obtain mean and sd over TS for prior in arma process phi0
   vector[nt] rts_m;
   vector[nt] rts_sd;
-  // off diagonal elements
-  int<lower = 1> od = ( nt*nt - nt ) / 2;
+
 #include /transformed_data/xh_marker.stan
 
   if( meanstructure == 0 ){
@@ -20,7 +20,7 @@ transformed data {
       rts_m[i] = mean(rts[,i]);
       rts_sd[i] = sd(rts[,i]);
     }
-  } else if (meanstructure == 1 ){
+  } else if (meanstructure == 1 || meanstructure == 2 ){
       // set rts_m to first element in ts
       for ( i in 1:nt ){
 	rts_m[i] = rts[1,i];
@@ -42,13 +42,8 @@ parameters {
   // C_sd is defined in tp, as function of betas
   corr_matrix[nt] C_R;
 
-  vector<lower = 0, upper = 1>[nt] A_diag[Q];
-  vector<lower = 0, upper = 1>[nt] B_diag[P];
-
-  vector[ od ] A_lower[Q];
-  vector[ od ] B_lower[P];
-  vector[ od ] A_upper[Q];
-  vector[ od ] B_upper[P];
+  matrix[nt, nt] A_raw[Q];
+  matrix[nt, nt] B_raw[P];
 
     // H1 init
   cov_matrix[nt] H1_init; 
@@ -62,51 +57,10 @@ transformed parameters {
 
   matrix[nt, nt] A_part = diag_matrix( rep_vector(0.0, nt));
   matrix[nt, nt] B_part = diag_matrix( rep_vector(0.0, nt));
-  
+
   matrix[nt+1, nt] beta = append_row( beta0, diag_matrix(beta1) );
   row_vector[nt] C_sd;
   cov_matrix[nt] Cnst; // Const is symmetric, A, B, are not  
-
-  // Construct square matrices with positive diagonals
-  matrix[nt, nt] A_raw[Q]; 
-  matrix[nt, nt] B_raw[P];
-
-   for(q in 1:Q) {
-    int L = 0;
-    int U = 0;
-    for( i in 1:nt ){
-      for( j in 1:nt ){
-	if ( i < j ) {
-	  U = U + 1;
-	  A_raw[q, i, j] = A_upper[q, U];
-	} else if ( i > j ) {
-	  L = L + 1;
-	  A_raw[q, i, j] = A_lower[q, L];
-	} else if (i == j ){
-	  A_raw[q, i, j] = A_diag[q, i];
-	}
-      }
-    }
-  }
-  
-
-  for(p in 1:P) {
-    int L = 0;
-    int U = 0;
-    for( i in 1:nt ){
-      for( j in 1:nt ){
-	if ( i < j ) {
-	  U = U + 1;
-	  B_raw[p, i, j] = B_upper[p, U];
-	} else if ( i > j ) {
-	  L = L + 1;
-	  B_raw[p, i, j] = B_lower[p, L];
-	} else if (i == j ){
-	  B_raw[p, i, j] = B_diag[p, i];
-	}
-      }
-    }
-  }  
     
   // Initialize model parameters
   mu[1,] = phi0;
@@ -140,6 +94,7 @@ transformed parameters {
 }
 model {
   // priors
+  // https://mc-stan.org/documentation/case-studies/mle-params.html
 
   // Prior on nu for student_t
   nu ~ normal( nt, 50 );
@@ -149,6 +104,7 @@ model {
 
   to_vector(theta) ~ std_normal();
   to_vector(phi) ~ std_normal(); 
+  //  to_vector(phi0) ~ normal();
   phi0 ~ multi_normal(rts_m, diag_matrix( rts_sd ) );
 
   to_vector(beta0) ~ std_normal();
@@ -156,18 +112,12 @@ model {
   C_R ~ lkj_corr( 1 );
 
   for(q in 1:Q) {
-    to_vector(A_upper[q]) ~ std_normal();
-    to_vector(A_lower[q]) ~ std_normal();
-    to_vector(A_diag[q]) ~ uniform( 0, 1 );
+    to_vector(A_raw[q]) ~ std_normal();
   }
-	  
-
   for(p in 1:P) {
-    to_vector(B_upper[p]) ~ std_normal();
-    to_vector(B_lower[p]) ~ std_normal();
-    to_vector(B_diag[p]) ~ uniform( 0, 1 );
+    to_vector(B_raw[p]) ~ std_normal();
   }
-	  
+    
   // likelihood
   if ( distribution == 0 ) {
     for(t in 1:T){
@@ -189,7 +139,17 @@ generated quantities {
   corr_matrix[nt] corH[T];
   row_vector[nt] C_var;
 
-  
+  for(q in 1:Q) {
+    if(A[q,1,1] < 0) {
+      A[q] = -A[q];
+    }
+  }
+  for(p in 1:P) {
+    if(B[p,1,1] < 0) {
+      B[p] = -B[p];
+    }
+  }
+
 //Const = multiply_lower_tri_self_transpose(Cnst);
   corC = C_R;
   C_var = exp(2*beta0 );
