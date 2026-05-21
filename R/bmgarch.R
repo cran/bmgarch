@@ -9,6 +9,7 @@
 #' @param meanstructure Character.
 #' @return bmgarch stan data list.
 #' @importFrom stats var
+#' @importFrom utils modifyList
 #' @keywords internal
 standat <- function(data, xC, P, Q, standardize_data, distribution, meanstructure){
 
@@ -89,12 +90,13 @@ standat <- function(data, xC, P, Q, standardize_data, distribution, meanstructur
 ##' @param parameterization Character (Default: "CCC"). The type of of parameterization. Must be one of "CCC", "DCC", "BEKK", or "pdBEKK".
 ##' @param P Integer. Dimension of GARCH component in MGARCH(P,Q).
 ##' @param Q Integer. Dimension of ARCH component in MGARCH(P,Q).
-##' @param iterations Integer (Default: 2000). Number of iterations for each chain (including warmup).
+##' @param iterations Integer (Default: 2000 for MCMC, 30000 for VB). Number of iterations. For MCMC, this includes warmup. For VB, this is the maximum number of ADVI gradient ascent iterations.
 ##' @param chains Integer (Default: 4). The number of Markov chains.
 ##' @param standardize_data Logical (Default: FALSE). Whether data should be standardized to easy computations. 
 ##' @param distribution Character (Default: "Student_t"). Distribution of innovation: "Student_t"  or "Gaussian"
 ##' @param meanstructure Character (Default: "constant"). Defines model for means. Either 'constant'  or 'ARMA'. Currently ARMA(1,1) only. OR 'VAR' (VAR1).
 ##' @param sampling_algorithm Character (Default" "MCMC"). Define sampling algorithm. Either 'MCMC'for Hamiltonian Monte Carlo or 'VB' for variational Bayes. 'VB' is inherited from stan and is currently in heavy development -- do not trust estimates.
+##' @param backend Select backend. Defaults to 'rstan' or select 'cmdstanr' if installed.
 ##' @param ... Additional arguments can be ‘chain_id’, ‘init_r’, ‘test_grad’, ‘append_samples’, ‘refresh’, ‘enable_random_init’ etc. See the documentation in \code{\link[rstan]{stan}}.
 ##' @return \code{bmgarch} object.
 ##' @importFrom Rdpack reprompt
@@ -149,12 +151,13 @@ bmgarch <- function(data,
                    parameterization = "CCC",
                    P = 1,
                    Q = 1,
-                   iterations = 2000,
+                   iterations = NULL,
                    chains = 4,
                    standardize_data = FALSE,
                    distribution = "Student_t",
                    meanstructure = "constant",
-                   sampling_algorithm = "MCMC", ...) {
+                   sampling_algorithm = "MCMC",
+                   backend =  "rstan", ...) {
     if ( tolower(distribution) == "gaussian" ) {
         num_dist <- 0
     } else if ( tolower(distribution) == "student_t" ) {
@@ -163,15 +166,42 @@ bmgarch <- function(data,
         stop( "\n\n Specify distribution: Gaussian or Student_t \n\n")
     }
 
+    if (is.null(iterations)) {
+        iterations <- if (sampling_algorithm == 'VB') 30000L else 2000L
+    }
+
     return_standat <- standat(data, xC, P, Q,  standardize_data, distribution = num_dist, meanstructure )
     stan_data <- return_standat[ c("T", "xC", "rts", "nt", "distribution", "P", "Q", "meanstructure")]
 
+    if(backend == 'rstan') {
     stanmodel <- switch(parameterization,
                         CCC = stanmodels$CCCMGARCH,
                         DCC = stanmodels$DCCMGARCH,
                         BEKK = stanmodels$BEKKMGARCH,
                         pdBEKK = stanmodels$pdBEKKMGARCH,
+                        const = stanmodels$constMGARCH,
                         NULL)
+    } else if(backend == 'cmdstanr') {
+      stan_path <- .get_target_stan_path()
+
+      ccc_file    <- file.path(stan_path, "CCCMGARCH.stan")
+      dcc_file    <- file.path(stan_path, "DCCMGARCH.stan")
+      bekk_file   <- file.path(stan_path, "BEKKMGARCH.stan")
+      pdbekk_file <- file.path(stan_path, "pdBEKKMGARCH.stan")
+      const_file  <- file.path(stan_path, "constMGARCH.stan")
+      stanmodel <- switch(parameterization,
+                        CCC = cmdstanr::cmdstan_model(ccc_file, include_paths =  stan_path,
+                                            cpp_options = list(stan_threads = TRUE)),
+                        DCC = cmdstanr::cmdstan_model(dcc_file, include_paths =  stan_path,
+                                            cpp_options = list(stan_threads = TRUE)),
+                        BEKK = cmdstanr::cmdstan_model(bekk_file, include_paths =  stan_path,
+                                                       cpp_options = list(stan_threads = TRUE)),
+                        pdBEKK = cmdstanr::cmdstan_model(pdbekk_file, include_paths =  stan_path,
+                                                         cpp_options = list(stan_threads = TRUE)),
+                        const = cmdstanr::cmdstan_model(const_file, include_paths = stan_path,
+                                                        cpp_options = list(stan_threads = TRUE)),
+                        NULL)
+    }
     if(is.null(stanmodel)) {
         stop("Not a valid model specification. ",
              parameterization,
@@ -182,21 +212,43 @@ bmgarch <- function(data,
 
     ## MCMC Sampling with NUTS
     if(sampling_algorithm == 'MCMC' ) {
-        model_fit <- rstan::sampling(stanmodel,
-                                     data = stan_data,
-                                     verbose = TRUE,
-                                     iter = iterations,
-                                     control = list(adapt_delta = .99),
-                                     chains = chains,
-                                     init_r = .05, ...)
+        if(backend == 'rstan') {
+            model_fit <- rstan::sampling(stanmodel,
+                                         data = stan_data,
+                                         verbose = TRUE,
+                                         iter = iterations,
+                                         control = list(adapt_delta = .99),
+                                         chains = chains,
+                                         init_r = .05, ...)
+        } else if(backend == 'cmdstanr') {
+            sample_args <- modifyList(list(threads_per_chain = 1L), list(...))
+            model_fit <- do.call(stanmodel$sample,
+                                 c(list(data         = stan_data,
+                                        iter_warmup  = iterations %/% 2,
+                                        iter_sampling = iterations %/% 2,
+                                        chains       = chains,
+                                        adapt_delta  = .99),
+                                   sample_args))
+        } else {
+            stop("Invalid backend specified.")
+        }
     } else if (sampling_algorithm == 'VB' ) {
-    ## Sampling via Variational Bayes
-    model_fit <- rstan::vb(stanmodel,
-                           data = stan_data,
-                           iter = iterations,
-                           importance_resampling = TRUE, ...)
+      if(backend == 'rstan') {
+        ## Sampling via Variational Bayes
+        model_fit <- rstan::vb(stanmodel,
+                               data = stan_data,
+                               iter = iterations,
+                               importance_resampling = TRUE, ...)
+      } else if (backend == 'cmdstanr') {
+          vb_args <- modifyList(list(threads = 1L), list(...))
+          model_fit <- do.call(stanmodel$variational,
+                               c(list(data = stan_data, iter = iterations),
+                                 vb_args))
+      } else {
+        stop("Invalid backend specified.")
+      }
     } else {
-        stop( "\n\n Provide sampling algorithm: 'MCMC' or 'VB'\n\n" )
+      stop( "\n\n Provide sampling algorithm: 'MCMC' or 'VB'\n\n" )
     }
     
     ## Model fit is based on standardized values.
@@ -205,13 +257,21 @@ bmgarch <- function(data,
     ## Values could be converted to original scale using something like this on the estimates
     ## orig_sd = stan_data$rts %*% diag(sds)
     ## orig_scale = orig_sd + array(rep(mns, each = aussi[[1]]$T), dim = c(aussi[[1]]$T, aussi[[1]]$nt) )
+    elapsed_time <- if (backend == 'rstan') {
+      rstan::get_elapsed_time(model_fit)
+    } else if (backend == 'cmdstanr' && sampling_algorithm == 'MCMC') {
+      t <- model_fit$time()$chains
+      matrix(c(t$warmup, t$sampling), ncol = 2, dimnames = list(NULL, c("warmup", "sample")))
+    } else {
+      NULL
+    }
     return_fit <- list(model_fit = model_fit,
                        param = parameterization,
                        distribution = distribution,
                        num_dist = num_dist,
                        iter = iterations,
                        chains = chains,
-                       elapsed_time = rstan::get_elapsed_time(model_fit),
+                       elapsed_time = elapsed_time,
                        date = date(),
                        nt = stan_data$nt,
                        TS_length = stan_data$T,
@@ -223,7 +283,8 @@ bmgarch <- function(data,
                        xC = stan_data$xC,
                        meanstructure = stan_data$meanstructure,
                        std_data = standardize_data,
-                       sampling_algorithm = sampling_algorithm)
+                       sampling_algorithm = sampling_algorithm,
+                       backend = backend)
     class(return_fit) <- "bmgarch"
     return(return_fit)
 }
@@ -235,4 +296,4 @@ bmgarch <- function(data,
 #' May facilitate more parameterizations, as we only have to update these, and the switch statements.
 #' @keywords internal
 #' @author Philippe Rast and Stephen R. Martin
-supported_models <- c("DCC", "CCC", "BEKK", "pdBEKK")
+supported_models <- c("DCC", "CCC", "BEKK", "pdBEKK", "const")

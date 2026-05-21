@@ -10,12 +10,13 @@ bmgarch(
   parameterization = "CCC",
   P = 1,
   Q = 1,
-  iterations = 2000,
+  iterations = NULL,
   chains = 4,
   standardize_data = FALSE,
   distribution = "Student_t",
   meanstructure = "constant",
   sampling_algorithm = "MCMC",
+  backend = "rstan",
   ...
 )
 }
@@ -30,7 +31,7 @@ bmgarch(
 
 \item{Q}{Integer. Dimension of ARCH component in MGARCH(P,Q).}
 
-\item{iterations}{Integer (Default: 2000). Number of iterations for each chain (including warmup).}
+\item{iterations}{Integer (Default: 2000 for MCMC, 30000 for VB). Number of iterations. For MCMC, this includes warmup. For VB, this is the maximum number of ADVI gradient ascent iterations.}
 
 \item{chains}{Integer (Default: 4). The number of Markov chains.}
 
@@ -41,6 +42,8 @@ bmgarch(
 \item{meanstructure}{Character (Default: "constant"). Defines model for means. Either 'constant'  or 'ARMA'. Currently ARMA(1,1) only. OR 'VAR' (VAR1).}
 
 \item{sampling_algorithm}{Character (Default" "MCMC"). Define sampling algorithm. Either 'MCMC'for Hamiltonian Monte Carlo or 'VB' for variational Bayes. 'VB' is inherited from stan and is currently in heavy development -- do not trust estimates.}
+
+\item{backend}{Select backend. Defaults to 'rstan' or select 'cmdstanr' if installed.}
 
 \item{...}{Additional arguments can be ‘chain_id’, ‘init_r’, ‘test_grad’, ‘append_samples’, ‘refresh’, ‘enable_random_init’ etc. See the documentation in \code{\link[rstan]{stan}}.}
 }

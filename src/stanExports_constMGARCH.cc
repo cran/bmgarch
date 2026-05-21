@@ -2,12 +2,12 @@
 
 #include <Rcpp.h>
 using namespace Rcpp ;
-#include "stanExports_forecastBEKK.h"
+#include "stanExports_constMGARCH.h"
 
-RCPP_MODULE(stan_fit4forecastBEKK_mod) {
+RCPP_MODULE(stan_fit4constMGARCH_mod) {
 
 
-    class_<rstan::stan_fit<stan_model, boost::ecuyer1988> >("rstantools_model_forecastBEKK")
+    class_<rstan::stan_fit<stan_model, boost::ecuyer1988> >("rstantools_model_constMGARCH")
 
     .constructor<SEXP,SEXP,SEXP>()
 

@@ -1,5 +1,5 @@
 ##' @keywords internal
-##' @importFrom stats sd
+##' @importFrom stats sd setNames
 .colSDs <- function(x) {
     lapply(x, function(x) {
         dims <- dim(x)
@@ -9,7 +9,7 @@
 
 ##' Obtain quantiles over columns in lists
 ##' @title Quantiles within lists
-##' @param x 
+##' @param x List of parameter sample arrays.
 ##' @param probs Quantile(s). Inherits from \code{forecast} which defaults to \code{c(.025, .975)}.
 ##' @return Quantiles at the column level within lists
 ##' @author philippe
@@ -54,11 +54,13 @@ summary.bmgarch <- function(object, CrI = c(.025, .975), digits = 2, ...) {
     out$meta$digits <- digits
 
     # Get the model summaries. print.summary.bmgarch will process this + meta.
+    const_params <- c("c_h", "R", "c_h_var")
     params <- switch(object$param,
                      CCC = c(ccc_params, arma_params, var_params, common_params),
                      DCC = c(dcc_params, arma_params, var_params, common_params),
                      BEKK = c(bekk_params, arma_params, var_params, common_params),
                      pdBEKK = c(bekk_params, arma_params, var_params, common_params),
+                     const = c(const_params, arma_params, var_params, common_params),
                      NULL
                      )
     if(is.null(params)) {
@@ -83,17 +85,43 @@ summary.bmgarch <- function(object, CrI = c(.025, .975), digits = 2, ...) {
 ##' @author Stephen R. Martin, Philippe Rast
 ##' @keywords internal
 .get_stan_summary <- function(model_fit, params, CrI, weights = NULL, sampling_algorithm ) {
-    ## Check if we are dealing with 1 or multiple models
-    if (inherits(model_fit, "stanfit") || (inherits(model_fit, "list") && length(model_fit) == 1)) {
-      if (inherits(model_fit, "list")) {
+    ## Unwrap single-element list before backend detection
+    if (inherits(model_fit, "list") && length(model_fit) == 1) {
         model_fit <- model_fit[[1]]
-      }
+    }
+    is_cmdstan <- inherits(model_fit, c("CmdStanMCMC", "CmdStanVB", "CmdStanMLE", "CmdStanGQ"))
+    ## Check if we are dealing with 1 or multiple models
+    if (inherits(model_fit, "stanfit") || is_cmdstan) {
         CrI <- c(.5, CrI)
+        if (is_cmdstan) {
+            tbl <- model_fit$summary(
+                variables = params,
+                mean = ~mean(.x),
+                sd = ~sd(.x),
+                ~quantile(.x, probs = CrI, names = TRUE)
+            )
+            if (sampling_algorithm == 'MCMC') {
+                diag_tbl <- model_fit$summary(variables = params,
+                                              rhat = posterior::rhat,
+                                              n_eff = posterior::ess_bulk)
+                tbl$n_eff <- diag_tbl$n_eff[match(tbl$variable, diag_tbl$variable)]
+                tbl$Rhat  <- diag_tbl$rhat[match(tbl$variable, diag_tbl$variable)]
+            } else {
+                tbl$n_eff <- NA_real_
+                tbl$Rhat  <- NA_real_
+            }
+            rn <- tbl$variable
+            tbl$variable <- NULL
+            mat <- as.matrix(tbl)
+            rownames(mat) <- rn
+            colnames(mat)[colnames(mat) == "50%"] <- "mdn"
+            return(mat)
+        }
         if(sampling_algorithm == 'MCMC') {
-            cols <- c("mean","sd",paste0(CrI*100, "%"), "n_eff", "Rhat")            
+            cols <- c("mean","sd",paste0(CrI*100, "%"), "n_eff", "Rhat")
         } else { ## VB does not return n_eff and Rhat
             if(sampling_algorithm == 'VB' ) {
-                cols <- c("mean","sd",paste0(CrI*100, "%"))                
+                cols <- c("mean","sd",paste0(CrI*100, "%"))
             }
         }
         model_summary <- rstan::summary(model_fit, pars = params, probs = CrI)$summary[,cols]
@@ -149,11 +177,40 @@ summary.bmgarch <- function(object, CrI = c(.025, .975), digits = 2, ...) {
     }
 }
 
+##' Extract named parameter list from either rstan or cmdstanr fit.
+##' Returns a named list matching the format of rstan::extract():
+##' each element is an array [draws, dim1, dim2, ...].
+##' @keywords internal
+.extract_param_list <- function(fit, params) {
+    if (inherits(fit, c("CmdStanMCMC", "CmdStanVB", "CmdStanMLE", "CmdStanGQ"))) {
+        lapply(setNames(params, params), function(p) {
+            dm    <- as.matrix(posterior::as_draws_matrix(fit$draws(variables = p)))
+            ndraws <- nrow(dm)
+            cols  <- colnames(dm)
+            if (length(cols) == 1 && !grepl("[", cols, fixed = TRUE)) {
+                return(as.numeric(dm))
+            }
+            idx_strs <- sub(paste0("^", p, "\\[(.*)\\]$"), "\\1", cols)
+            idx_mat  <- do.call(rbind, lapply(strsplit(idx_strs, ","), as.integer))
+            dims     <- apply(idx_mat, 2, max)
+            arr      <- array(NA_real_, dim = c(ndraws, dims))
+            for (j in seq_along(cols)) {
+                arr <- do.call("[<-", c(list(arr, seq_len(ndraws)),
+                                        as.list(idx_mat[j, ]),
+                                        list(dm[, j])))
+            }
+            arr
+        })
+    } else {
+        rstan::extract(fit, pars = params)
+    }
+}
+
 .weighted_samples <- function(model_fit, params, weights) {
     ##################
     # Extract method #
     ##################
-    samps <- lapply(model_fit, rstan::extract, pars = params)
+    samps <- lapply(model_fit, .extract_param_list, params = params)
     # Apply weights
     for(i in seq_len(length(samps))) { # Each model
         samps[[i]] <- lapply(samps[[i]], function(p) { # Each parameter
@@ -165,6 +222,50 @@ summary.bmgarch <- function(object, CrI = c(.025, .975), digits = 2, ...) {
         Reduce("+", lapply(samps, function(m) {m[[p]]})) # Sum samples together
     })
     names(samps_comb) <- params
+
+    # Between-model covariance correction (law of total variance).
+    # For each covariance param [draws, T, nt, nt], add
+    #   Σ_m w_m (μ̂_m − μ̂_mix)(μ̂_m − μ̂_mix)ᵀ
+    # to every draw so that colMeans() returns the correct ensemble posterior
+    # predictive covariance.  The mapping from covariance param to its
+    # corresponding mean param is fixed by the Stan model naming convention.
+    cov_to_mean <- list(H = "mu", H_forecasted = "rts_forecasted")
+    cov_params  <- intersect(params, names(cov_to_mean))
+
+    if (length(cov_params) > 0) {
+        for (p in cov_params) {
+            mean_param  <- cov_to_mean[[p]]
+            mean_samps  <- lapply(model_fit, function(m) {
+                .extract_param_list(m, mean_param)[[mean_param]]
+            })
+            # Per-model posterior predictive means: [T, nt]
+            mu_list <- lapply(mean_samps, function(m) {
+                apply(m, seq(2L, length(dim(m))), mean)
+            })
+            # Mixture mean: [T, nt]
+            mu_mix <- Reduce("+", mapply(function(mu, wi) wi * mu,
+                                         mu_list, weights, SIMPLIFY = FALSE))
+
+            nd <- length(dim(samps_comb[[p]]))
+            if (nd == 4L) {  # [draws, T, nt, nt]
+                T_len  <- dim(samps_comb[[p]])[2]
+                nt     <- dim(samps_comb[[p]])[3]
+                correction <- array(0, dim = c(T_len, nt, nt))
+                for (mi in seq_len(length(model_fit))) {
+                    for (t in seq_len(T_len)) {
+                        dd <- mu_list[[mi]][t, ] - mu_mix[t, ]
+                        correction[t, , ] <- correction[t, , ] + weights[mi] * outer(dd, dd)
+                    }
+                }
+                # Broadcast [T, nt, nt] correction across draws dimension
+                n_draws <- dim(samps_comb[[p]])[1]
+                corr_4d <- aperm(array(correction, dim = c(T_len, nt, nt, n_draws)),
+                                 c(4L, 1L, 2L, 3L))
+                samps_comb[[p]] <- samps_comb[[p]] + corr_4d
+            }
+        }
+    }
+
     return(samps_comb)
 }
 

@@ -128,10 +128,11 @@ forecast.bmgarch <- function(object, ahead = 1, xC = NULL,
                         compute_log_lik =  compute_log_lik)
 
         gqs_model <- switch(m$param,
-                            DCC = stanmodels$forecastDCC,
-                            CCC = stanmodels$forecastCCC,
-                            BEKK =stanmodels$forecastBEKK,
+                            DCC    = stanmodels$forecastDCC,
+                            CCC    = stanmodels$forecastCCC,
+                            BEKK   = stanmodels$forecastBEKK,
                             pdBEKK = stanmodels$forecastBEKK,
+                            const  = stanmodels$forecastConst,
                             NULL)
         if(is.null(gqs_model)) {
             stop("bmgarch object 'param' does not match a supported model. ",
@@ -145,8 +146,13 @@ forecast.bmgarch <- function(object, ahead = 1, xC = NULL,
         forecast_end <- (m$TS_length + ahead)
 
         ## TODO: Limit pars to only what is needed (H_p, R/R_p, rts_p, mu_p)
+        draws_mat <- if (inherits(m$model_fit, c("CmdStanMCMC", "CmdStanVB", "CmdStanMLE", "CmdStanGQ"))) {
+            as.matrix(posterior::as_draws_matrix(m$model_fit$draws()))
+        } else {
+            as.matrix(m$model_fit)
+        }
         forecasted <- rstan::gqs(gqs_model,
-                                 draws = as.matrix(m$model_fit),
+                                 draws = draws_mat,
                                  data = standat,
                                  seed = seed)
         return(forecasted)
@@ -465,7 +471,7 @@ print.fitted.bmgarch <- function(x, ...) {
     return(invisible(object))
 }
 
-##' Helper function for as.data.frame.{fitted, forecast}. Converts predictive array to data.frame.
+##' Helper function for as.data.frame.fitted.bmgarch and as.data.frame.forecast.bmgarch. Converts predictive array to data.frame.
 ##' 
 ##' 
 ##' @title Convert predictive array to data.frame.
